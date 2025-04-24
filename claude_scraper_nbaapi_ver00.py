@@ -9,6 +9,22 @@ from datetime import datetime, timedelta
 from nba_api.stats.static import players, teams
 from nba_api.stats.endpoints import playergamelog, teamgamelog, boxscoretraditionalv2
 from nba_api.stats.library.parameters import SeasonAll, SeasonType
+from xgboost import XGBRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error
+from sklearn.preprocessing import StandardScaler
+
+
+## We scrape on game-by-game data with the intention of predicting the stats of the next game
+## (obv, but AI usually starts with seasonal data -- so this should be specified)
+## With how this is setup we are only scraping the current 2024-2025 data 
+## -> crtl+F 2024 and update it for when next year's season rolls around 
+## I had this bias bc for ex: Luka was on the Mavs last season, but is now on the Lakers
+## We do not have it setup to scrape for playoff data or all-star data, 
+## figuring out how to include playoffs next would be nice, but does not seem super necessary
+## We do not need any all-star data -> games are exhibitionist and not serious
+
+
 
 # Setup logging
 logging.basicConfig(
@@ -340,7 +356,7 @@ class NBADataScraper:
     
     def visualize_player_comparison(self, player1_name, player2_name, stat_column):
         """
-        Create a visualization comparing two players' statistics with dates on the x-axis.
+        Create a visualization comparing two players' statistics.
         
         Args:
             player1_name (str): Name of the first player
@@ -381,75 +397,44 @@ class NBADataScraper:
                 return None
                 
             # Create figure and axis
-            fig, ax = plt.subplots(figsize=(14, 6))
-            
-            # Convert game dates to datetime objects
-            try:
-                # Convert string dates to datetime objects
-                player1_data['GAME_DATE_DT'] = pd.to_datetime(player1_data['GAME_DATE'])
-                player2_data['GAME_DATE_DT'] = pd.to_datetime(player2_data['GAME_DATE'])
-            except Exception as e:
-                logger.error(f"Error converting dates: {str(e)}")
-                # If conversion fails, try an alternative format or implement a custom parser
-                try:
-                    # Example of handling NBA API's date format (may vary)
-                    player1_data['GAME_DATE_DT'] = pd.to_datetime(player1_data['GAME_DATE'], format='%b %d, %Y')
-                    player2_data['GAME_DATE_DT'] = pd.to_datetime(player2_data['GAME_DATE'], format='%b %d, %Y')
-                except Exception as e2:
-                    logger.error(f"Error with alternative date conversion: {str(e2)}")
-                    logger.error(f"Sample date format: {player1_data['GAME_DATE'].iloc[0] if not player1_data.empty else 'No data'}")
-                    # Fall back to using game number if date conversion fails completely
-                    return None
+            fig, ax = plt.subplots(figsize=(12, 6))
             
             # Sort by date
-            player1_data = player1_data.sort_values('GAME_DATE_DT')
-            player2_data = player2_data.sort_values('GAME_DATE_DT')
+            player1_data = player1_data.sort_values('GAME_DATE')
+            player2_data = player2_data.sort_values('GAME_DATE')
             
-            # Plot data using dates
-            ax.plot(player1_data['GAME_DATE_DT'], player1_data[stat_column], 'b-', marker='o', markersize=4, label=player1_name)
-            ax.plot(player2_data['GAME_DATE_DT'], player2_data[stat_column], 'r-', marker='o', markersize=4, label=player2_name)
+            # Plot data
+            ax.plot(range(len(player1_data)), player1_data[stat_column], 'b-', label=player1_name)
+            ax.plot(range(len(player2_data)), player2_data[stat_column], 'r-', label=player2_name)
             
             # Add rolling average (last 5 games)
             window = min(5, len(player1_data), len(player2_data))
             if window > 1:
-                player1_data['rolling_avg'] = player1_data[stat_column].rolling(window=window).mean()
-                player2_data['rolling_avg'] = player2_data[stat_column].rolling(window=window).mean()
+                player1_rolling = player1_data[stat_column].rolling(window=window).mean()
+                player2_rolling = player2_data[stat_column].rolling(window=window).mean()
                 
-                ax.plot(player1_data['GAME_DATE_DT'], player1_data['rolling_avg'], 'b--', alpha=0.7, 
+                ax.plot(range(len(player1_data)), player1_rolling, 'b--', alpha=0.7, 
                         label=f"{player1_name} (5-game avg)")
-                ax.plot(player2_data['GAME_DATE_DT'], player2_data['rolling_avg'], 'r--', alpha=0.7,
+                ax.plot(range(len(player2_data)), player2_rolling, 'r--', alpha=0.7,
                         label=f"{player2_name} (5-game avg)")
             
-            # Format x-axis with month labels
-            import matplotlib.dates as mdates
-            # Set major locator to show months
-            ax.xaxis.set_major_locator(mdates.MonthLocator())
-            # Format the labels as month names
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%B'))
-            
-            # Rotate date labels for better readability
-            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
-            
             # Add labels and title
-            ax.set_xlabel('Game Date')
+            ax.set_xlabel('Game Number')
             ax.set_ylabel(stat_column)
             ax.set_title(f'{stat_column} Comparison: {player1_name} vs {player2_name}')
             ax.legend()
             ax.grid(True, alpha=0.3)
             
-            # Add season average lines
+            # Add season average line
             player1_avg = player1_data[stat_column].mean()
             player2_avg = player2_data[stat_column].mean()
             
             ax.axhline(y=player1_avg, color='b', linestyle=':', alpha=0.5,
-                    label=f"{player1_name} Avg: {player1_avg:.1f}")
+                       label=f"{player1_name} Avg: {player1_avg:.1f}")
             ax.axhline(y=player2_avg, color='r', linestyle=':', alpha=0.5,
-                    label=f"{player2_name} Avg: {player2_avg:.1f}")
+                       label=f"{player2_name} Avg: {player2_avg:.1f}")
             
             ax.legend()
-            
-            # Adjust layout to make room for rotated x-labels
-            plt.tight_layout()
             
             # Save figure
             output_dir = os.path.join(self.data_dir, "visualizations")
@@ -465,10 +450,10 @@ class NBADataScraper:
         except Exception as e:
             logger.error(f"Error creating visualization: {str(e)}")
             return None
-
+            
     def visualize_team_comparison(self, team1_name, team2_name, stat_column):
         """
-        Create a visualization comparing two teams' statistics with dates on the x-axis.
+        Create a visualization comparing two teams' statistics.
         
         Args:
             team1_name (str): Name of the first team
@@ -509,57 +494,29 @@ class NBADataScraper:
                 return None
                 
             # Create figure and axis
-            fig, ax = plt.subplots(figsize=(14, 6))
-            
-            # Convert game dates to datetime objects
-            try:
-                # Convert string dates to datetime objects
-                team1_data['GAME_DATE_DT'] = pd.to_datetime(team1_data['GAME_DATE'])
-                team2_data['GAME_DATE_DT'] = pd.to_datetime(team2_data['GAME_DATE'])
-            except Exception as e:
-                logger.error(f"Error converting dates: {str(e)}")
-                # If conversion fails, try an alternative format or implement a custom parser
-                try:
-                    # Example of handling NBA API's date format (may vary)
-                    team1_data['GAME_DATE_DT'] = pd.to_datetime(team1_data['GAME_DATE'], format='%b %d, %Y')
-                    team2_data['GAME_DATE_DT'] = pd.to_datetime(team2_data['GAME_DATE'], format='%b %d, %Y')
-                except Exception as e2:
-                    logger.error(f"Error with alternative date conversion: {str(e2)}")
-                    logger.error(f"Sample date format: {team1_data['GAME_DATE'].iloc[0] if not team1_data.empty else 'No data'}")
-                    # Fall back to using game number if date conversion fails completely
-                    return None
+            fig, ax = plt.subplots(figsize=(12, 6))
             
             # Sort by date
-            team1_data = team1_data.sort_values('GAME_DATE_DT')
-            team2_data = team2_data.sort_values('GAME_DATE_DT')
+            team1_data = team1_data.sort_values('GAME_DATE')
+            team2_data = team2_data.sort_values('GAME_DATE')
             
-            # Plot data using dates
-            ax.plot(team1_data['GAME_DATE_DT'], team1_data[stat_column], 'b-', marker='o', markersize=4, label=team1_name)
-            ax.plot(team2_data['GAME_DATE_DT'], team2_data[stat_column], 'r-', marker='o', markersize=4, label=team2_name)
+            # Plot data
+            ax.plot(range(len(team1_data)), team1_data[stat_column], 'b-', label=team1_name)
+            ax.plot(range(len(team2_data)), team2_data[stat_column], 'r-', label=team2_name)
             
             # Add rolling average (last 5 games)
             window = min(5, len(team1_data), len(team2_data))
             if window > 1:
-                team1_data['rolling_avg'] = team1_data[stat_column].rolling(window=window).mean()
-                team2_data['rolling_avg'] = team2_data[stat_column].rolling(window=window).mean()
+                team1_rolling = team1_data[stat_column].rolling(window=window).mean()
+                team2_rolling = team2_data[stat_column].rolling(window=window).mean()
                 
-                ax.plot(team1_data['GAME_DATE_DT'], team1_data['rolling_avg'], 'b--', alpha=0.7, 
+                ax.plot(range(len(team1_data)), team1_rolling, 'b--', alpha=0.7, 
                         label=f"{team1_name} (5-game avg)")
-                ax.plot(team2_data['GAME_DATE_DT'], team2_data['rolling_avg'], 'r--', alpha=0.7,
+                ax.plot(range(len(team2_data)), team2_rolling, 'r--', alpha=0.7,
                         label=f"{team2_name} (5-game avg)")
             
-            # Format x-axis with month labels
-            import matplotlib.dates as mdates
-            # Set major locator to show months
-            ax.xaxis.set_major_locator(mdates.MonthLocator())
-            # Format the labels as month names
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%B'))
-            
-            # Rotate date labels for better readability
-            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
-            
             # Add labels and title
-            ax.set_xlabel('Game Date')
+            ax.set_xlabel('Game Number')
             ax.set_ylabel(stat_column)
             ax.set_title(f'Team {stat_column} Comparison: {team1_name} vs {team2_name}')
             ax.legend()
@@ -570,14 +527,11 @@ class NBADataScraper:
             team2_avg = team2_data[stat_column].mean()
             
             ax.axhline(y=team1_avg, color='b', linestyle=':', alpha=0.5,
-                    label=f"{team1_name} Avg: {team1_avg:.1f}")
+                       label=f"{team1_name} Avg: {team1_avg:.1f}")
             ax.axhline(y=team2_avg, color='r', linestyle=':', alpha=0.5,
-                    label=f"{team2_name} Avg: {team2_avg:.1f}")
+                       label=f"{team2_name} Avg: {team2_avg:.1f}")
             
             ax.legend()
-            
-            # Adjust layout to make room for rotated x-labels
-            plt.tight_layout()
             
             # Save figure
             output_dir = os.path.join(self.data_dir, "visualizations")
@@ -643,6 +597,124 @@ class NBADataScraper:
         except Exception as e:
             logger.error(f"Error during spot check for game ID {game_id}: {str(e)}")
             return False
+        
+    def predict_next_game_points(self, player_name, visualize=True):
+        """
+        Simple XGBoost example to predict a player's next game points.
+        
+        Args:
+            player_name (str): Name of the player to predict for
+            visualize (bool): Whether to show feature importance plot
+            
+        Returns:
+            dict: Prediction results and model metrics
+        """
+        try:
+            # Get player data
+            player_id = self.get_player_id_by_name(player_name)
+            if not player_id:
+                return {"error": f"Player {player_name} not found"}
+                
+            df = self.get_player_game_log(player_id, save=False)
+            if df.empty:
+                return {"error": f"No data found for {player_name}"}
+                
+            # Sort by date and prepare data
+            df = df.sort_values('GAME_DATE')
+            
+            # Create features (using simple rolling averages)
+            features = [
+                'PTS', 'REB', 'AST', 'FG_PCT', 'MIN', 
+                'FGA', 'FG3A', 'FTA'
+            ]
+            
+            # Create lagged features (previous game stats)
+            for feature in features:
+                df[f'prev_{feature}'] = df[feature].shift(1)
+                
+            # Create rolling averages (last 3 games)
+            for feature in features:
+                df[f'rolling3_{feature}'] = df[feature].rolling(3).mean().shift(1)
+                
+            # Target is next game's points
+            df['target'] = df['PTS'].shift(-1)
+            
+            # Remove rows with missing values
+            df = df.dropna()
+            
+            if len(df) < 10:
+                return {"error": "Not enough data to build model"}
+                
+            # Split data
+            X = df[[col for col in df.columns if col.startswith('prev_') or col.startswith('rolling3_')]]
+            y = df['target']
+            
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=42
+            )
+            
+            # Scale features
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train)
+            X_test_scaled = scaler.transform(X_test)
+            
+            # Train simple XGBoost model
+            model = XGBRegressor(
+                n_estimators=100,
+                max_depth=3,
+                learning_rate=0.1,
+                random_state=42
+            )
+            
+            model.fit(X_train_scaled, y_train)
+            
+            # Make predictions
+            train_preds = model.predict(X_train_scaled)
+            test_preds = model.predict(X_test_scaled)
+            
+            # Calculate metrics
+            train_mae = mean_absolute_error(y_train, train_preds)
+            test_mae = mean_absolute_error(y_test, test_preds)
+            
+            # Get feature importance
+            importance = model.feature_importances_
+            feat_importance = dict(zip(X.columns, importance))
+            
+            # Visualize feature importance
+            if visualize:
+                plt.figure(figsize=(10, 6))
+                plt.barh(list(feat_importance.keys()), list(feat_importance.values()))
+                plt.title(f'Feature Importance for {player_name} Points Prediction')
+                plt.xlabel('Importance Score')
+                plt.tight_layout()
+                
+                output_dir = os.path.join(self.data_dir, "visualizations")
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
+                    
+                file_path = os.path.join(output_dir, f"{player_name.replace(' ', '_')}_feature_importance.png")
+                plt.savefig(file_path)
+                plt.close()
+            
+            # Prepare next game prediction
+            last_game = X.iloc[-1:].values
+            last_game_scaled = scaler.transform(last_game)
+            next_game_pred = model.predict(last_game_scaled)[0]
+            
+            return {
+                "player": player_name,
+                "train_mae": round(train_mae, 2),
+                "test_mae": round(test_mae, 2),
+                "next_game_prediction": round(next_game_pred, 1),
+                "last_5_games_actual": df['PTS'].tail(5).tolist(),
+                "feature_importance": feat_importance
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in predict_next_game_points: {str(e)}")
+            return {"error": str(e)}
+
+        
 
 # Example usage function
 def demo_usage():
@@ -706,6 +778,13 @@ def demo_usage():
     except Exception as e:
         logger.error(f"Error in demo: {str(e)}")
 
+
+## To compare different players, just update  player_name and another_player
+##  with their full proper names and same goes for team_name and another_team
+## i.e. put in the full proper name ex: Karl-Anthony Towns is the proper name or Los Angeles Lakers
+## Luka Doncic's name or names with special characters have been normalized afaik, 
+## so entering Luka Doncic, Nikola Jokic, Bogdan Bovanivic(idk how to spell his name) as the name should work
+## demo_usage and demo_usage2 are the exact same functions, but I just included two 
 def demo_usage2():
     """
     Demonstrate how to use the NBADataScraper class.
@@ -716,7 +795,7 @@ def demo_usage2():
         logger.info("NBA Data Scraper initialized successfully")
         
         # Get data for a specific player (e.g., Luka Doncic)
-        player_name = "Giannis Antetokounmpo"
+        player_name = "Dennis Schroder"
         player_id = scraper.get_player_id_by_name(player_name)
         
         if player_id:
@@ -736,7 +815,7 @@ def demo_usage2():
                 logger.error(f"Failed to retrieve game data for {player_name}")
                 
         # Get data for a specific team (e.g., Los Angeles Lakers)
-        team_name = "Orlando Magic"
+        team_name = "New York Knicks"
         team_id = scraper.get_team_id_by_name(team_name)
         
         if team_id:
@@ -749,7 +828,7 @@ def demo_usage2():
                 logger.info(team_data.head().to_string())
                 
                 # Example team visualization
-                another_team = "Miami Heat"
+                another_team = "Milwaukee Bucks"
                 logger.info(f"Creating visualization comparing {team_name} and {another_team}")
                 scraper.visualize_team_comparison(team_name, another_team, "PTS")
             else:
@@ -767,11 +846,62 @@ def demo_usage2():
     except Exception as e:
         logger.error(f"Error in demo: {str(e)}")
 
+def xgeg():
+    try:
+        # Initialize the scraper (THIS LINE WAS MISSING)
+        scraper = NBADataScraper(season="2024-25")
+        logger.info("NBA Data Scraper initialized successfully")
+        
+        # [Rest of your existing demo_usage code...]
+        
+        # Add XGBoost prediction example at the end
+        player_to_predict = "Luka Doncic"
+        logger.info(f"\nRunning XGBoost prediction for {player_to_predict}")
+        prediction_result = scraper.predict_next_game_points(player_to_predict)
+        
+        if "error" not in prediction_result:
+            logger.info(f"\nPrediction Results for {player_to_predict}:")
+            logger.info(f"- Train MAE: {prediction_result['train_mae']}")
+            logger.info(f"- Test MAE: {prediction_result['test_mae']}")
+            logger.info(f"- Next game points prediction: {prediction_result['next_game_prediction']}")
+            logger.info(f"- Last 5 games actual points: {prediction_result['last_5_games_actual']}")
+            logger.info("\nTop 5 important features:")
+            for feat, imp in sorted(prediction_result['feature_importance'].items(), key=lambda x: -x[1])[:5]:
+                logger.info(f"{feat}: {imp:.3f}")
+        else:
+            logger.error(f"Prediction failed: {prediction_result['error']}")
+            
+    except Exception as e:
+        logger.error(f"Error in demo: {str(e)}")
+
+
 
 if __name__ == "__main__":
     logger.info("Starting NBA Data Scraper")
-    demo_usage()
-    demo_usage2()
-
-
-
+    
+    # Initialize scraper once
+    scraper = NBADataScraper(season="2024-25")
+    
+    # Example 1: Basic scraping demo
+    # demo_usage2()
+    
+    # Example 2: XGBoost prediction
+    try:
+        player_to_predict = "Dennis Schroder" 
+        
+        logger.info(f"\nRunning XGBoost prediction for {player_to_predict}")
+        prediction_result = scraper.predict_next_game_points(player_to_predict)
+        
+        if "error" not in prediction_result:
+            logger.info(f"\nPrediction Results for {player_to_predict}:")
+            logger.info(f"- Train MAE: {prediction_result['train_mae']}")
+            logger.info(f"- Test MAE: {prediction_result['test_mae']}")
+            logger.info(f"- Next game points prediction: {prediction_result['next_game_prediction']}")
+            logger.info(f"- Last 5 games actual points: {prediction_result['last_5_games_actual']}")
+            logger.info("\nTop 5 important features:")
+            for feat, imp in sorted(prediction_result['feature_importance'].items(), key=lambda x: -x[1])[:5]:
+                logger.info(f"{feat}: {imp:.3f}")
+        else:
+            logger.error(f"Prediction failed: {prediction_result['error']}")
+    except Exception as e:
+        logger.error(f"Error in prediction demo: {str(e)}")
