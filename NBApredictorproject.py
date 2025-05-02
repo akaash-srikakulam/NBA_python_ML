@@ -625,7 +625,8 @@ class NBADataScraper:
             # Create features (using simple rolling averages)
             features = [
                 'PTS', 'REB', 'AST', 'FG_PCT', 'MIN', 
-                'FGA', 'FG3A', 'FTA'
+                'FGA', 'FG3A', 'FTA', 'FGM', 'FG3M', 'FTM',
+                'STL', 'PLUS_MINUS'
             ]
             
             # Create lagged features (previous game stats)
@@ -649,9 +650,10 @@ class NBADataScraper:
             X = df[[col for col in df.columns if col.startswith('prev_') or col.startswith('rolling3_')]]
             y = df['target']
             
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=0.2, random_state=42
-            )
+            # Sequential split based on time order (data is already sorted by GAME_DATE)
+            split_idx = int(len(X) * 0.8)
+            X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
+            y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
             
             # Scale features
             scaler = StandardScaler()
@@ -784,97 +786,6 @@ def demo_usage():
 ## i.e. put in the full proper name ex: Karl-Anthony Towns is the proper name or Los Angeles Lakers
 ## Luka Doncic's name or names with special characters have been normalized afaik, 
 ## so entering Luka Doncic, Nikola Jokic, Bogdan Bovanivic(idk how to spell his name) as the name should work
-## demo_usage and demo_usage2 are the exact same functions, but I just included two 
-def demo_usage2():
-    """
-    Demonstrate how to use the NBADataScraper class.
-    """
-    try:
-        # Initialize the scraper
-        scraper = NBADataScraper(season="2024-25")
-        logger.info("NBA Data Scraper initialized successfully")
-        
-        # Get data for a specific player (e.g., Luka Doncic)
-        player_name = "Dennis Schroder"
-        player_id = scraper.get_player_id_by_name(player_name)
-        
-        if player_id:
-            logger.info(f"Getting game log for {player_name}")
-            player_data = scraper.get_player_game_log(player_id)
-            
-            if not player_data.empty:
-                logger.info(f"Successfully retrieved {len(player_data)} games for {player_name}")
-                logger.info(f"Last 5 games:")
-                logger.info(player_data.head().to_string())
-                
-                # Example visualization
-                another_player = "Karl-Anthony Towns"
-                logger.info(f"Creating visualization comparing {player_name} and {another_player}")
-                scraper.visualize_player_comparison(player_name, another_player, "AST")
-            else:
-                logger.error(f"Failed to retrieve game data for {player_name}")
-                
-        # Get data for a specific team (e.g., Los Angeles Lakers)
-        team_name = "New York Knicks"
-        team_id = scraper.get_team_id_by_name(team_name)
-        
-        if team_id:
-            logger.info(f"Getting game log for {team_name}")
-            team_data = scraper.get_team_game_log(team_id)
-            
-            if not team_data.empty:
-                logger.info(f"Successfully retrieved {len(team_data)} games for {team_name}")
-                logger.info(f"Last 5 games:")
-                logger.info(team_data.head().to_string())
-                
-                # Example team visualization
-                another_team = "Milwaukee Bucks"
-                logger.info(f"Creating visualization comparing {team_name} and {another_team}")
-                scraper.visualize_team_comparison(team_name, another_team, "PTS")
-            else:
-                logger.error(f"Failed to retrieve game data for {team_name}")
-                
-            # If we have game IDs, we can spot check a game
-            if not team_data.empty and 'GAME_ID' in team_data.columns:
-                game_id = team_data['GAME_ID'].iloc[0]
-                logger.info(f"Performing spot check on game ID {game_id}")
-                spot_check_result = scraper.spot_check_game(game_id)
-                logger.info(f"Spot check {'passed' if spot_check_result else 'failed'}")
-                
-        logger.info("Demo completed successfully")
-        
-    except Exception as e:
-        logger.error(f"Error in demo: {str(e)}")
-
-def xgeg():
-    try:
-        # Initialize the scraper (THIS LINE WAS MISSING)
-        scraper = NBADataScraper(season="2024-25")
-        logger.info("NBA Data Scraper initialized successfully")
-        
-        # [Rest of your existing demo_usage code...]
-        
-        # Add XGBoost prediction example at the end
-        player_to_predict = "Luka Doncic"
-        logger.info(f"\nRunning XGBoost prediction for {player_to_predict}")
-        prediction_result = scraper.predict_next_game_points(player_to_predict)
-        
-        if "error" not in prediction_result:
-            logger.info(f"\nPrediction Results for {player_to_predict}:")
-            logger.info(f"- Train MAE: {prediction_result['train_mae']}")
-            logger.info(f"- Test MAE: {prediction_result['test_mae']}")
-            logger.info(f"- Next game points prediction: {prediction_result['next_game_prediction']}")
-            logger.info(f"- Last 5 games actual points: {prediction_result['last_5_games_actual']}")
-            logger.info("\nTop 5 important features:")
-            for feat, imp in sorted(prediction_result['feature_importance'].items(), key=lambda x: -x[1])[:5]:
-                logger.info(f"{feat}: {imp:.3f}")
-        else:
-            logger.error(f"Prediction failed: {prediction_result['error']}")
-            
-    except Exception as e:
-        logger.error(f"Error in demo: {str(e)}")
-
-
 
 if __name__ == "__main__":
     logger.info("Starting NBA Data Scraper")
@@ -883,11 +794,11 @@ if __name__ == "__main__":
     scraper = NBADataScraper(season="2024-25")
     
     # Example 1: Basic scraping demo
-    # demo_usage2()
+    #demo_usage()
     
     # Example 2: XGBoost prediction
     try:
-        player_to_predict = "Dennis Schroder" 
+        player_to_predict = "Luka Doncic" 
         
         logger.info(f"\nRunning XGBoost prediction for {player_to_predict}")
         prediction_result = scraper.predict_next_game_points(player_to_predict)
